@@ -1,0 +1,20 @@
+[package]
+name = "mathnnue"
+version = "1.0.0"
+edition = "2021"
+authors = ["MathNNUE contributors"]
+description = "Two neural networks teaching and examining elementary arithmetic with a native egui laboratory"
+license = "MIT"
+
+[dependencies]
+eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+rand = { version = "0.8.5", features = ["small_rng"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1

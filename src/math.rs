@@ -1,0 +1,218 @@
+//! Grammar, syllabus and a trusted oracle used ONLY for teaching, question
+//! construction and grading. Student prediction must never call `oracle`.
+use rand::Rng;
+use std::fmt;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Op { Add, Sub, Mul, Div }
+impl Op {
+    pub fn index(self) -> usize { match self { Self::Add => 0, Self::Sub => 1, Self::Mul => 2, Self::Div => 3 } }
+    pub fn symbol(self) -> &'static str { match self { Self::Add => "+", Self::Sub => "-", Self::Mul => "×", Self::Div => "÷" } }
+}
+
+#[derive(Clone, Debug)]
+pub enum Expr {
+    Num(i64),
+    Calc(Op, Box<Expr>, Box<Expr>),
+}
+impl Expr {
+    pub fn calc(op: Op, left: Expr, right: Expr) -> Self {
+        Self::Calc(op, Box::new(left), Box::new(right))
+    }
+}
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Num(v) => write!(f, "{v}"),
+            Self::Calc(op, a, b) => write!(f, "({a} {} {b})", op.symbol()),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Stage {
+    pub name: &'static str,
+    pub max_value: i64,
+    pub max_digits: usize,
+    pub multiplier_digits: usize,
+    pub ops: &'static [Op],
+    pub chain: bool,
+    pub signed: bool,
+}
+const A: &[Op] = &[Op::Add];
+const AS: &[Op] = &[Op::Add, Op::Sub];
+const ASM: &[Op] = &[Op::Add, Op::Sub, Op::Mul];
+const ASMD: &[Op] = &[Op::Add, Op::Sub, Op::Mul, Op::Div];
+pub const STAGES: [Stage; 10] = [
+    Stage { name:"초1 · 한 자리 덧셈", max_value:9, max_digits:1, multiplier_digits:1, ops:A, chain:false, signed:false },
+    Stage { name:"초1 · 덧셈과 뺄셈 (20 이내)", max_value:19, max_digits:2, multiplier_digits:1, ops:AS, chain:false, signed:false },
+    Stage { name:"초2 · 두 자리 덧셈과 뺄셈", max_value:99, max_digits:2, multiplier_digits:1, ops:AS, chain:false, signed:false },
+    Stage { name:"초3 · 세 자리 연산과 구구단", max_value:999, max_digits:3, multiplier_digits:1, ops:ASM, chain:false, signed:false },
+    Stage { name:"초3 · 나눗셈 도입", max_value:999, max_digits:3, multiplier_digits:1, ops:ASMD, chain:false, signed:false },
+    Stage { name:"초4 · 네 자리 연산", max_value:9999, max_digits:4, multiplier_digits:1, ops:ASMD, chain:false, signed:false },
+    Stage { name:"초4 · 두 자리 수 곱셈", max_value:9999, max_digits:4, multiplier_digits:2, ops:ASMD, chain:false, signed:false },
+    Stage { name:"초5 · 혼합 계산", max_value:99999, max_digits:5, multiplier_digits:2, ops:ASMD, chain:true, signed:false },
+    Stage { name:"초6 · 음수와 혼합 계산", max_value:99999, max_digits:5, multiplier_digits:2, ops:ASMD, chain:true, signed:true },
+    Stage { name:"확장 · 여섯 자리와 복합 계산", max_value:999999, max_digits:6, multiplier_digits:3, ops:ASMD, chain:true, signed:true },
+];
+
+pub fn oracle(expr: &Expr) -> Result<i64, String> {
+    match expr {
+        Expr::Num(n) => Ok(*n),
+        Expr::Calc(op, left, right) => {
+            let a = oracle(left)?;
+            let b = oracle(right)?;
+            let result = match op {
+                Op::Add => a.checked_add(b),
+                Op::Sub => a.checked_sub(b),
+                Op::Mul => a.checked_mul(b),
+                Op::Div => match a.checked_rem(b) { Some(0) => a.checked_div(b), _ => None },
+            };
+            result.filter(|n| n.unsigned_abs() <= 1_000_000_000_000_000_000)
+                .ok_or_else(|| "정수 범위를 벗어나거나 정확히 나누어지지 않습니다".to_owned())
+        }
+    }
+}
+
+fn pow10(digits: usize) -> i64 { 10_i64.pow(digits as u32) }
+fn rand_value<R: Rng>(rng: &mut R, limit: i64) -> i64 { rng.gen_range(0..=limit.max(0)) }
+
+fn has_carry_or_borrow(op: Op, a: i64, b: i64) -> bool {
+    let a = a.unsigned_abs() % 10;
+    let b = b.unsigned_abs() % 10;
+    match op {
+        Op::Add => a + b >= 10,
+        Op::Sub => a < b,
+        Op::Mul => a * b >= 40,
+        Op::Div => b >= 6,
+    }
+}
+
+/// The neural examiner chooses `op`, `digits`, `hardness` and `chain`.
+/// This sampler materializes valid, integer-only problems; it is NOT the student.
+/// For examination, a balanced grid fixes op/digits/hardness to stop easy-test gaming.
+pub fn generate<R: Rng>(stage_idx: usize, op: Op, digits: usize, hardness: usize, chain: bool, rng: &mut R) -> Expr {
+    let stage = STAGES[stage_idx.min(STAGES.len()-1)];
+    let digits = digits.clamp(1, stage.max_digits);
+    let max = (pow10(digits) - 1).min(stage.max_value);
+    let mul_max = (pow10(stage.multiplier_digits.min(digits)) - 1).max(1);
+    let mut a = 0;
+    let mut b = 0;
+    for _ in 0..100 {
+        match op {
+            Op::Add | Op::Sub => {
+                a = rand_value(rng, max);
+                b = rand_value(rng, max);
+                if op == Op::Sub && !stage.signed && b > a {
+                    std::mem::swap(&mut a, &mut b);
+                }
+            }
+            Op::Mul => {
+                a = rand_value(rng, max.min(if stage_idx == 3 {9} else {max}));
+                b = rand_value(rng, mul_max);
+            }
+            Op::Div => {
+                // A valid exact quotient is generated by the examination oracle,
+                // never by the student network. Divisor always has one digit.
+                b = rng.gen_range(1..=9);
+                let quotient = rand_value(rng, max / b);
+                a = quotient * b;
+            }
+        }
+        if hardness < 2 || has_carry_or_borrow(op, a, b) { break; }
+    }
+    if stage.signed && rng.gen_bool(0.30) { a = -a; }
+    if stage.signed && op != Op::Div && rng.gen_bool(0.25) { b = -b; }
+    let base = Expr::calc(op, Expr::Num(a), Expr::Num(b));
+    if !stage.chain || !chain { return base; }
+
+    // Use only +/- for the additional step to prevent enormous intermediate values.
+    let c = rand_value(rng, max.min(99));
+    let value = oracle(&base).unwrap_or(0);
+    let follow = if rng.gen_bool(0.5) && (stage.signed || value >= c) { Op::Sub } else { Op::Add };
+    Expr::calc(follow, base, Expr::Num(c))
+}
+
+pub fn parse(input: &str) -> Result<Expr, String> {
+    let mut p = Parser { chars: input.chars().collect(), pos: 0 };
+    let expr = p.expression(0)?;
+    p.skip_space();
+    if p.pos != p.chars.len() { return Err(format!("지원하지 않는 문자: {}", p.chars[p.pos])); }
+    Ok(expr)
+}
+struct Parser { chars: Vec<char>, pos: usize }
+impl Parser {
+    fn skip_space(&mut self) { while self.pos < self.chars.len() && self.chars[self.pos].is_whitespace() { self.pos += 1; } }
+    fn peek(&mut self) -> Option<char> { self.skip_space(); self.chars.get(self.pos).copied() }
+    fn eat(&mut self) -> Option<char> { let c = self.peek()?; self.pos += 1; Some(c) }
+    fn expression(&mut self, min_prec: u8) -> Result<Expr, String> {
+        let mut lhs = self.atom()?;
+        loop {
+            let Some(c) = self.peek() else { break; };
+            let (op, prec) = match c {
+                '+' => (Op::Add, 1),
+                '-' | '−' => (Op::Sub, 1),
+                '*' | '×' => (Op::Mul, 2),
+                '/' | '÷' => (Op::Div, 2),
+                _ => break,
+            };
+            if prec < min_prec { break; }
+            self.eat();
+            let rhs = self.expression(prec+1)?;
+            lhs = Expr::calc(op, lhs, rhs);
+        }
+        Ok(lhs)
+    }
+    fn atom(&mut self) -> Result<Expr, String> {
+        let mut negative = false;
+        while let Some(c) = self.peek() {
+            if c == '+' { self.eat(); }
+            else if c == '-' || c == '−' { self.eat(); negative = !negative; }
+            else { break; }
+        }
+        match self.peek() {
+            Some('(') => {
+                self.eat();
+                let expr = self.expression(0)?;
+                if self.eat() != Some(')') { return Err("닫는 괄호가 필요합니다".into()); }
+                if negative { Ok(Expr::calc(Op::Sub, Expr::Num(0), expr)) } else { Ok(expr) }
+            }
+            Some(c) if c.is_ascii_digit() => {
+                let mut n = 0_i64;
+                while let Some(d) = self.peek().and_then(|c| c.to_digit(10)) {
+                    self.eat();
+                    n = n.checked_mul(10).and_then(|v| v.checked_add(d as i64))
+                        .ok_or("너무 큰 정수입니다")?;
+                }
+                Ok(Expr::Num(if negative { -n } else { n }))
+            }
+            _ => Err("정수, 괄호, + - × ÷ 를 사용해 주세요".into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::{rngs::SmallRng, SeedableRng};
+    #[test]
+    fn precedence_parentheses_and_negatives() {
+        assert_eq!(oracle(&parse("1+2*3").unwrap()).unwrap(), 7);
+        assert_eq!(oracle(&parse("-(3+4)*2").unwrap()).unwrap(), -14);
+        assert_eq!(oracle(&parse("-4--5").unwrap()).unwrap(), 1);
+        assert!(parse("sin(x)").is_err());
+        assert!(oracle(&parse("5/2").unwrap()).is_err());
+    }
+    #[test]
+    fn all_generator_stages_produce_valid_questions() {
+        let mut rng = SmallRng::seed_from_u64(1);
+        for (index, stage) in STAGES.iter().enumerate() {
+            for &op in stage.ops {
+                for _ in 0..300 {
+                    let q = generate(index, op, stage.max_digits, 2, true, &mut rng);
+                    assert!(oracle(&q).is_ok(), "invalid question at {index}: {q}");
+                }
+            }
+        }
+    }
+}
