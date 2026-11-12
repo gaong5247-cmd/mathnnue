@@ -18,6 +18,8 @@ jobs:
         run: cargo check
       - name: Tests
         run: cargo test
+      - name: Self-test 1900 higher-math generated challenges
+        run: cargo run --release -- --smoke
       - name: Release executable
         run: cargo build --release
       - name: Upload Windows executable

@@ -1,9 +1,9 @@
 [package]
 name = "mathnnue"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 authors = ["MathNNUE contributors"]
-description = "Two neural networks teaching and examining elementary arithmetic with a native egui laboratory"
+description = "Dual NNUE curriculum with arithmetic, verified algebra/calculus, adaptive creative examination and egui"
 license = "MIT"
 
 [dependencies]

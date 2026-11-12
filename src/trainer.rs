@@ -1,5 +1,7 @@
 //! Teacher/Examiner orchestration; runs on its own OS thread so egui remains responsive.
 use crate::examiner::{ExamForce, Examiner};
+use crate::advanced;
+use crate::creative::{AdvancedStudent, CreativeExaminer, Forced};
 use crate::math::{oracle, parse, STAGES};
 use crate::solver::{expected_nodes, Student};
 use rand::{rngs::SmallRng, SeedableRng};
@@ -7,13 +9,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 pub const EXAM_SIZE:usize=100_000;
 pub const TRAIN_PER_EXAM:usize=20_000;
-const CHECKPOINT:&str="checkpoints/latest.json";
+pub const TOTAL_STAGES:usize=STAGES.len()+advanced::STAGES.len();
+fn stage_name(stage:usize)->&'static str {
+    if stage<STAGES.len(){STAGES[stage].name}
+    else {advanced::STAGES[(stage-STAGES.len()).min(advanced::STAGES.len()-1)].name}
+}
+fn checkpoint_path()->std::path::PathBuf {
+    let root=std::env::var_os("LOCALAPPDATA")
+        .or_else(||std::env::var_os("XDG_DATA_HOME"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(||std::env::current_dir().unwrap_or_else(|_|std::path::PathBuf::from(".")));
+    root.join("MathNNUE").join("checkpoints").join("latest.json")
+}
 
 #[derive(Clone,Serialize,Deserialize,Default)]
 pub struct OpRecord {
@@ -35,6 +47,8 @@ pub struct ExamRecord {
     pub total_steps:usize,
     pub passed:bool,
     pub per_op:[OpRecord;4],
+    #[serde(default)] pub advanced:bool,
+    #[serde(default)] pub structural_unique:usize,
 }
 impl ExamRecord {
     pub fn accuracy(&self)->f32 {ratio(self.correct,self.questions)}
@@ -54,32 +68,44 @@ pub struct BrainState {
     pub student:Student,
     pub examiner:Examiner,
     pub history:Vec<ExamRecord>,
+    #[serde(default="AdvancedStudent::new")] pub advanced_student:AdvancedStudent,
+    #[serde(default="CreativeExaminer::new")] pub creative_examiner:CreativeExaminer,
+    #[serde(default)] pub frontier_passes:u64,
 }
 impl BrainState {
     pub fn fresh()->Self {
-        Self{version:1,stage:0,mastered:false,trained:0,trained_this_stage:0,
-            exams:0,student:Student::new(),examiner:Examiner::new(),history:Vec::new()}
+        Self{version:3,stage:0,mastered:false,trained:0,trained_this_stage:0,
+            exams:0,student:Student::new(),examiner:Examiner::new(),history:Vec::new(),
+            advanced_student:AdvancedStudent::new(),creative_examiner:CreativeExaminer::new(),frontier_passes:0}
     }
     pub fn load()->Result<Self,String> {
-        let data=fs::read(CHECKPOINT).map_err(|e|format!("체크포인트 없음: {e}"))?;
-        let state:Self=serde_json::from_slice(&data).map_err(|e|format!("체크포인트 파싱 실패: {e}"))?;
-        if state.version!=1 || state.stage>=STAGES.len() || state.student.brain.outputs!=20 || state.examiner.brain.outputs!=15 {
+        let data=fs::read(checkpoint_path()).or_else(|_|fs::read("checkpoints/latest.json")).map_err(|e|format!("체크포인트 없음: {e}"))?;
+        let mut state:Self=serde_json::from_slice(&data).map_err(|e|format!("체크포인트 파싱 실패: {e}"))?;
+        if state.version==1 && state.examiner.brain.outputs==15 {
+            // Preserve the student weights when upgrading an older examiner.
+            state.version=2;
+            state.examiner=Examiner::new();
+        }
+        if state.version==2 {state.version=3;}
+        if state.version!=3 || state.stage>=TOTAL_STAGES || state.student.brain.outputs!=20 || state.examiner.brain.outputs!=35
+            || state.advanced_student.brain.outputs!=advanced::SKILL_COUNT || state.creative_examiner.brain.outputs!=48 {
             return Err("지원되지 않는 체크포인트 구조입니다".into());
         }
         Ok(state)
     }
     pub fn save(&self)->Result<(),String> {
-        fs::create_dir_all("checkpoints").map_err(|e|e.to_string())?;
+        let path=checkpoint_path();
+        let folder=path.parent().ok_or("체크포인트 폴더를 찾지 못함")?;
+        fs::create_dir_all(folder).map_err(|e|e.to_string())?;
         let data=serde_json::to_vec(self).map_err(|e|e.to_string())?;
-        let tmp=Path::new("checkpoints/latest.json.tmp");
-        let mut file=File::create(tmp).map_err(|e|e.to_string())?;
+        let tmp=folder.join("latest.json.tmp");
+        let mut file=File::create(&tmp).map_err(|e|e.to_string())?;
         file.write_all(&data).map_err(|e|e.to_string())?;
         file.sync_all().map_err(|e|e.to_string())?;
         drop(file);
-        let path=Path::new(CHECKPOINT);
-        if fs::rename(tmp,path).is_err() {
-            if path.exists() {fs::remove_file(path).map_err(|e|e.to_string())?;}
-            fs::rename(tmp,path).map_err(|e|e.to_string())?;
+        if fs::rename(&tmp,&path).is_err() {
+            if path.exists() {fs::remove_file(&path).map_err(|e|e.to_string())?;}
+            fs::rename(&tmp,&path).map_err(|e|e.to_string())?;
         }
         Ok(())
     }
@@ -109,9 +135,15 @@ pub struct Snapshot {
     pub student_params:usize,
     pub examiner_params:usize,
     pub message:String,
+    pub novelty_recent:usize,
+    pub novelty_fresh:u64,
+    pub novelty_total:u64,
+    pub creative_params:usize,
+    pub advanced_params:usize,
+    pub frontier_passes:u64,
 }
 #[derive(Debug)]
-pub enum Command { Start, Pause, Exam, Save, Ask(String), Generate(usize), Shutdown }
+pub enum Command { Start, Pause, Exam, Save, Ask(String), Generate(usize), Preview(usize,usize), Shutdown }
 pub enum Event {
     Snapshot(Snapshot),
     Notice(String),
@@ -168,12 +200,12 @@ impl Worker {
     }
     fn snapshot(&self)->Snapshot {
         Snapshot {
-            stage:self.state.stage,stage_name:STAGES[self.state.stage].name.into(),
+            stage:self.state.stage,stage_name:stage_name(self.state.stage).into(),
             running:self.running,mastered:self.state.mastered,in_exam:self.in_exam,
             exam_progress:self.exam_progress,trained:self.state.trained,
             trained_this_stage:self.state.trained_this_stage,
             micro_steps:self.state.student.steps_trained,
-            generation_trials:self.state.examiner.trials,
+            generation_trials:self.state.examiner.trials+self.state.creative_examiner.updates,
             current_question:self.current_question.clone(),current_guess:self.current_guess.clone(),
             expected:self.expected.clone(),neural_policy:self.neural_policy.clone(),trace:self.trace.clone(),
             recent_accuracy:self.recent_accuracy(),recent_completion:self.recent_completion(),
@@ -181,6 +213,12 @@ impl Worker {
             student_params:self.state.student.brain.parameter_count(),
             examiner_params:self.state.examiner.brain.parameter_count(),
             message:self.message.clone(),
+            novelty_recent:self.state.creative_examiner.archive.distinct_recent(),
+            novelty_fresh:self.state.creative_examiner.archive.fresh,
+            novelty_total:self.state.creative_examiner.archive.generated,
+            creative_params:self.state.creative_examiner.brain.parameter_count(),
+            advanced_params:self.state.advanced_student.brain.parameter_count(),
+            frontier_passes:self.state.frontier_passes,
         }
     }
     fn send_snapshot(&mut self,force:bool) {
@@ -200,6 +238,7 @@ impl Worker {
             Command::Save => {let result=self.state.save();self.notice(match result {Ok(_)=>"체크포인트 저장 완료".into(),Err(e)=>format!("저장 오류: {e}")});},
             Command::Ask(question) => self.ask(question),
             Command::Generate(n) => self.quiz(n.clamp(1,40)),
+            Command::Preview(stage,n) => self.preview(stage,n.clamp(1,40)),
             Command::Shutdown => {self.exiting=true;let _=self.state.save();},
         }
     }
@@ -212,11 +251,18 @@ impl Worker {
                     .unwrap_or_else(||format!("풀이 실패: {}",solution.error.unwrap_or_default()));
                 (prediction,expected,solution.confidence,solution.trace)
             }
-            Err(e)=>(format!("입력 오류: {e}"),"—".into(),0.0,Vec::new()),
+            Err(arithmetic_error)=>match crate::input::parse_custom(&question) {
+                Ok(challenge)=>{
+                    let result=self.state.advanced_student.solve(&challenge,true);
+                    (result.prediction,result.expected,result.confidence,result.trace)
+                }
+                Err(advanced_error)=>(format!("미지원 입력 · 산술: {arithmetic_error} / 대수: {advanced_error}"),"—".into(),0.0,Vec::new()),
+            },
         };
         let _=self.tx.send(Event::Answer{question,prediction,expected,confidence,trace});
     }
     fn quiz(&mut self,count:usize) {
+        if self.state.stage>=STAGES.len(){self.preview(self.state.stage-STAGES.len(),count);return;}
         let mut questions=Vec::with_capacity(count);
         for _ in 0..count {
             let c=self.state.examiner.choose(self.state.stage,self.recent_accuracy(),None,&mut self.rng);
@@ -226,7 +272,44 @@ impl Worker {
         }
         let _=self.tx.send(Event::Quiz(questions));
     }
+    fn preview(&mut self,advanced_stage:usize,count:usize) {
+        let mut questions=Vec::with_capacity(count);
+        for _ in 0..count {
+            let (_,challenge)=self.state.creative_examiner.propose(advanced_stage,
+                self.recent_accuracy(),None,&mut self.rng);
+            if challenge.certified(){questions.push((challenge.text(),challenge.expected()));}
+        }
+        let _=self.tx.send(Event::Quiz(questions));
+        self.notice(format!("{} 창작형 출제 미리보기 · 학습 단계는 변경되지 않음",
+            advanced::STAGES[advanced_stage.min(advanced::STAGES.len()-1)].name));
+    }
+    fn train_advanced(&mut self){
+        let stage=self.state.stage-STAGES.len();
+        let (choice,question)=self.state.creative_examiner.propose(stage,
+            self.recent_accuracy(),None,&mut self.rng);
+        let valid=question.certified();
+        if !valid {self.state.creative_examiner.reinforce(&choice,false,0.0,false);return;}
+        let verbose=self.state.trained%97==0;
+        let solution=self.state.advanced_student.solve(&question,verbose);
+        let novel=self.state.creative_examiner.archive.observe(question.pattern);
+        self.state.creative_examiner.reinforce(&choice,solution.correct,novel,valid);
+        self.state.advanced_student.learn(&question);
+        self.add_recent(solution.correct,solution.completed);
+        self.state.trained+=1;
+        self.state.trained_this_stage+=1;
+        if verbose {
+            self.current_question=question.text();
+            self.current_guess=solution.prediction;
+            self.expected=solution.expected;
+            self.neural_policy=format!("{} · 구조 참신성 {:.2} · 구조 #{}",choice.describe(),novel,question.pattern);
+            self.trace=solution.trace;
+        }
+        if self.state.trained_this_stage>=TRAIN_PER_EXAM {self.exam_requested=true;}
+        if self.state.trained%5000==0 {let _=self.state.save();}
+        self.send_snapshot(false);
+    }
     fn train_one(&mut self) {
+        if self.state.stage>=STAGES.len(){self.train_advanced();return;}
         let choice=self.state.examiner.choose(self.state.stage,self.recent_accuracy(),None,&mut self.rng);
         let expr=self.state.examiner.compose(self.state.stage,&choice,&mut self.rng);
         let target=match oracle(&expr) {Ok(n)=>n,Err(_)=>return};
@@ -239,7 +322,7 @@ impl Worker {
         self.state.examiner.reinforce(&choice,reward);
         self.state.student.learn_problem(&expr);
         // Mixed digit drills improve transfer between unseen multi-digit problems.
-        self.state.student.drill(&mut self.rng);
+        self.state.student.drill(&mut self.rng,self.state.stage);
         self.add_recent(correct,complete);
         self.state.trained+=1;
         self.state.trained_this_stage+=1;
@@ -271,6 +354,7 @@ impl Worker {
     }
     fn examination(&mut self,n:usize) {
         let stage=self.state.stage;
+        if stage>=STAGES.len(){self.examination_advanced(n);return;}
         self.in_exam=true;
         self.exam_paused=false;
         self.exam_progress=0;
@@ -281,6 +365,7 @@ impl Worker {
         let mut record=ExamRecord {
             stage,ordinal:self.state.exams+1,questions:n,unique:0,correct:0,completed:0,
             correct_steps:0,total_steps:0,passed:false,per_op:std::array::from_fn(|_|OpRecord::default()),
+            advanced:false,structural_unique:0,
         };
         let mut unique=HashSet::with_capacity(n.min(100_000));
         let mut exam_rng=SmallRng::seed_from_u64(0x5eed_0000+record.ordinal*1000+stage as u64);
@@ -293,7 +378,8 @@ impl Worker {
                 if self.exiting {break;}
             }
             let op=profile.ops[i % profile.ops.len()];
-            let width=(i / profile.ops.len()) % profile.max_digits + 1;
+            let width=if stage==3 && op==crate::math::Op::Mul {1}
+                else {(i / profile.ops.len()) % profile.max_digits + 1};
             let hardness=(i / (profile.ops.len()*profile.max_digits)) % 3;
             let choice=self.state.examiner.choose(stage,self.recent_accuracy(),
                 Some(ExamForce{op,digits:width,hardness,
@@ -336,17 +422,97 @@ impl Worker {
             record.unique,n,if record.passed {"통과"}else{"재학습"});
         self.notice(msg);
         if record.passed {
-            if stage+1<STAGES.len() {
+            if stage+1<TOTAL_STAGES {
                 self.state.stage+=1;
                 self.recent.clear();self.recent_correct=0;self.recent_completed=0;
-                self.notice(format!("승급! 다음 단계: {}",STAGES[self.state.stage].name));
+                self.notice(format!("승급! 다음 단계: {}",stage_name(self.state.stage)));
             } else {
                 self.state.mastered=true;
-                self.running=false;
-                self.notice("모든 기본 단계 통과! 출제/질문 모드를 사용하세요".to_owned());
+                self.state.frontier_passes+=1;
+                self.notice("최종 단계 인증: 무한 도전/추가 출제 학습을 계속합니다".to_owned());
             }
         }
         if let Err(e)=self.state.save() {self.notice(format!("자동 저장 오류: {e}"));}
+        self.send_snapshot(true);
+    }
+    fn examination_advanced(&mut self,n:usize){
+        let stage=self.state.stage;
+        let level=stage-STAGES.len();
+        self.in_exam=true;
+        self.exam_paused=false;
+        self.exam_requested=false;
+        self.exam_progress=0;
+        self.notice(format!("제{}회 고급 시험 · {} · {}문항 (훈련과 분리된 고정 균형 검증)",
+            self.state.exams+1,advanced::STAGES[level].name,n));
+        self.send_snapshot(true);
+        let mut record=ExamRecord{
+            stage,ordinal:self.state.exams+1,questions:n,unique:0,correct:0,completed:0,
+            correct_steps:0,total_steps:0,passed:false,per_op:std::array::from_fn(|_|OpRecord::default()),
+            advanced:true,structural_unique:0,
+        };
+        let mut exact=HashSet::with_capacity(n.min(100_000));
+        let mut structures=HashSet::new();
+        let mut rng=SmallRng::seed_from_u64(0xADD0_2026+record.ordinal*1009+stage as u64);
+        let allowed=advanced::STAGES[level].skills;
+        for i in 0..n {
+            if i%256==0 {
+                self.exam_progress=i;
+                self.send_snapshot(false);
+                self.handle_exam_commands();
+                if self.exiting {break;}
+            }
+            let family=allowed[i%allowed.len()];
+            let difficulty=(i/allowed.len())%6;
+            let (choice,q)=self.state.creative_examiner.propose(level,self.recent_accuracy(),
+                Some(Forced{family,difficulty}),&mut rng);
+            if !q.certified(){continue;}
+            let solution=self.state.advanced_student.solve(&q,false);
+            let group=difficulty%4;
+            let stat=&mut record.per_op[group];
+            stat.total+=1;
+            stat.correct+=usize::from(solution.correct);
+            stat.completed+=usize::from(solution.completed);
+            stat.correct_steps+=solution.solved_parts;
+            stat.total_steps+=solution.total_parts;
+            record.correct+=usize::from(solution.correct);
+            record.completed+=usize::from(solution.completed);
+            record.correct_steps+=solution.solved_parts;
+            record.total_steps+=solution.total_parts;
+            exact.insert(q.text());
+            structures.insert(q.pattern);
+            if i%1999==0 {
+                self.current_question=q.text();
+                self.current_guess=solution.prediction;
+                self.expected=solution.expected;
+                self.neural_policy=format!("분리 검증 · {}",choice.describe());
+                self.trace=self.state.advanced_student.solve(&q,true).trace;
+            }
+        }
+        if self.exiting {self.in_exam=false;return;}
+        self.exam_progress=n;
+        self.in_exam=false;
+        record.unique=exact.len();
+        record.structural_unique=structures.len();
+        record.passed=n==EXAM_SIZE&&record.accuracy()>=0.90&&record.step_rate()>=0.90&&record.completion()>=0.90;
+        self.state.exams+=1;
+        self.state.history.push(record.clone());
+        if self.state.history.len()>60{self.state.history.remove(0);}
+        self.state.trained_this_stage=0;
+        self.notice(format!("고급 시험 · 정답 {:.2}% / 풀이 {:.2}% / 완주 {:.2}% · 구조 {}개 · {}",
+            record.accuracy()*100.0,record.step_rate()*100.0,record.completion()*100.0,
+            record.structural_unique,if record.passed{"승급"}else{"재학습"}));
+        if record.passed {
+            self.recent.clear();self.recent_correct=0;self.recent_completed=0;
+            if stage+1<TOTAL_STAGES {
+                self.state.stage+=1;
+                self.notice(format!("새 주제 해금: {}",stage_name(self.state.stage)));
+            } else {
+                self.state.mastered=true;
+                self.state.frontier_passes+=1;
+                self.notice("인증형 최종 템플릿 통과 · 새 수학 이론 증명과는 별개입니다. 창작 학습은 계속됩니다.");
+            }
+        }
+        if let Err(e)=self.state.save(){self.notice(format!("자동 저장 실패: {e}"));}
         self.send_snapshot(true);
     }
     pub fn run(mut self) {
@@ -379,7 +545,7 @@ mod tests {
     fn zero_questions_never_passes_and_step_rate_is_real() {
         let r=ExamRecord {stage:0,ordinal:1,questions:100_000,unique:10,correct:95_000,
             completed:95_000,correct_steps:81_000,total_steps:100_000,passed:false,
-            per_op:std::array::from_fn(|_|OpRecord::default())};
+            per_op:std::array::from_fn(|_|OpRecord::default()),advanced:false,structural_unique:0};
         assert!(r.accuracy()>=0.90);
         assert!(r.step_rate()<0.90);
     }

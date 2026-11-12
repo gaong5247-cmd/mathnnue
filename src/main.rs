@@ -1,3 +1,6 @@
+mod advanced;
+mod creative;
+mod input;
 mod examiner;
 mod math;
 mod neural;
@@ -27,6 +30,7 @@ struct MathApp {
     answer:Option<ManualAnswer>,
     quiz:Vec<(String,String)>,
     quiz_count:usize,
+    preview_level:usize,
     show_answers:bool,
     notices:Vec<String>,
 }
@@ -37,7 +41,7 @@ impl MathApp {
         let (worker_events, events)=mpsc::channel();
         let worker=thread::spawn(move||Worker::new(worker_events,worker_commands).run());
         Self {command,events,worker:Some(worker),snapshot:Snapshot::default(),input:"1+1".into(),
-            answer:None,quiz:Vec::new(),quiz_count:10,show_answers:false,notices:Vec::new()}
+            answer:None,quiz:Vec::new(),quiz_count:10,preview_level:12,show_answers:false,notices:Vec::new()}
     }
     fn send(&self,command:Command) {let _=self.command.send(command);}
     fn poll(&mut self) {
@@ -60,10 +64,10 @@ impl MathApp {
             ui.heading(egui::RichText::new("MathNNUE").size(30.0).strong());
             ui.label(egui::RichText::new("STUDENT × EXAMINER").color(egui::Color32::LIGHT_BLUE));
             ui.separator();
-            ui.label(if self.snapshot.mastered {"전 단계 통과"} else if self.snapshot.in_exam {"10만 문제 시험 진행"}
+            ui.label(if self.snapshot.mastered {"인증형 전 과정 통과 · 지속 학습"} else if self.snapshot.in_exam {"10만 문제 시험 진행"}
                 else if self.snapshot.running {"학습 중"} else {"일시정지"});
         });
-        ui.label("순수 신경망 자리수 추론 · 이중 NNUE 자율 출제 · 시험 기반 자동 승급");
+        ui.label("초등: 순수 숫자 예측 NNUE / 고급: 신경망 풀이 전략 + 검증 가능한 수학 규칙 / 출제: 탐색·변이·신규성 보상");
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui|{
             if ui.button("▶ 학습 / 재개").clicked() {self.send(Command::Start);}
@@ -74,13 +78,15 @@ impl MathApp {
     }
     fn stage_card(&self,ui:&mut egui::Ui) {
         egui::Frame::group(ui.style()).show(ui,|ui|{
-            ui.heading(format!("현재 단계 {}/{} · {}", self.snapshot.stage+1,math::STAGES.len(),self.snapshot.stage_name));
+            ui.heading(format!("현재 단계 {}/{} · {}", self.snapshot.stage+1,trainer::TOTAL_STAGES,self.snapshot.stage_name));
             ui.horizontal_wrapped(|ui|{
                 ui.label(format!("학습 문항: {}",fmt_num(self.snapshot.trained)));
                 ui.separator();
                 ui.label(format!("미세 NNUE 학습: {}",fmt_num(self.snapshot.micro_steps)));
                 ui.separator();
                 ui.label(format!("출제 NNUE 업데이트: {}",fmt_num(self.snapshot.generation_trials)));
+                ui.separator();
+                ui.label(format!("최종 단계 재통과: {}",self.snapshot.frontier_passes));
             });
             let fraction=(self.snapshot.trained_this_stage as f32 / TRAIN_PER_EXAM as f32).clamp(0.0,1.0);
             ui.add(egui::ProgressBar::new(fraction).text(format!("이번 단계 학습: {} / {}",fmt_num(self.snapshot.trained_this_stage as u64),fmt_num(TRAIN_PER_EXAM as u64))));
@@ -94,6 +100,10 @@ impl MathApp {
                 ui.label(format!("최근 완주율 {:.1}%",100.0*self.snapshot.recent_completion));
             });
             ui.label(egui::RichText::new(&self.snapshot.message).weak());
+            if self.snapshot.stage>=math::STAGES.len(){
+                ui.label(format!("구조 탐색: 최근 {}개 패턴 / 누적 새 패턴 {} / 출제 {}",
+                    fmt_num(self.snapshot.novelty_recent as u64),fmt_num(self.snapshot.novelty_fresh),fmt_num(self.snapshot.novelty_total)));
+            }
         });
     }
     fn live_card(&self,ui:&mut egui::Ui) {
@@ -123,14 +133,16 @@ impl MathApp {
                     ui.label(format!("풀이 단계 정확도 {:.2}%",record.step_rate()*100.0));
                     ui.label(format!("완주율 {:.2}%",record.completion()*100.0));
                 });
-                ui.label(format!("서로 다른 식: {}개 (중복 포함 출제)",fmt_num(record.unique as u64)));
+                ui.label(format!("서로 다른 식: {}개",fmt_num(record.unique as u64)));
+                if record.advanced {ui.label(format!("구조적으로 구별한 패턴: {}개",fmt_num(record.structural_unique as u64)));}
                 ui.label(if record.passed {"결과: 90/90/90 기준 통과 및 다음 학년 승급"}
                     else {"결과: 기준 미달 — 현 단계 반복 학습"});
                 ui.separator();
                 for (index,op) in ["+","−","×","÷"].iter().enumerate() {
+                    let title=if record.advanced {format!("검증 강도 그룹 {}",index+1)} else {format!("{} 연산",op)};
                     let stat=&record.per_op[index];
                     if stat.total==0 {continue;}
-                    ui.label(format!("{} 연산: {}문항 · 정답 {:.1}% · 단계 {:.1}%",op,fmt_num(stat.total as u64),
+                    ui.label(format!("{}: {}문항 · 정답 {:.1}% · 단계 {:.1}%",title,fmt_num(stat.total as u64),
                         100.0*stat.correct as f32/stat.total as f32,
                         if stat.total_steps==0 {0.0}else{100.0*stat.correct_steps as f32/stat.total_steps as f32}));
                 }
@@ -145,7 +157,7 @@ impl MathApp {
     fn interactive_card(&mut self,ui:&mut egui::Ui) {
         egui::Frame::group(ui.style()).show(ui,|ui|{
             ui.heading("직접 문제 보내서 NNUE 시험하기");
-            ui.label("예: 1+1, 17*8, (12+7)*3, -14+5, 96/8");
+            ui.label("예: 1+1, 3x+7=22, x²-5x+6=0, diff 2x^3+4x at x=2, integral 0 2 3x^2+4x");
             ui.horizontal(|ui|{
                 let response=ui.add(egui::TextEdit::singleline(&mut self.input).desired_width(f32::INFINITY));
                 let submit=ui.button("풀어봐").clicked() ||
@@ -163,7 +175,21 @@ impl MathApp {
                 });
             }
             ui.add_space(7.0);
-            ui.label("참고: 학습 초반에는 1+1조차 틀릴 수 있습니다. 검증 정답은 NNUE에 주입되지 않습니다.");
+            ui.label("초등은 숫자별 NNUE 예측, 대수·미적분은 NNUE가 풀이 프로그램을 선택합니다. 미지원 자유형 수식도 있습니다.");
+        });
+    }
+    fn creative_card(&mut self,ui:&mut egui::Ui) {
+        egui::Frame::group(ui.style()).show(ui,|ui|{
+            ui.heading("창의 출제 실험실 · 대학/올림피아드/연구형");
+            ui.label("미리보기는 학습 승급을 건너뛰지 않습니다. 문제 문법은 확대되지만 실제 IMO 독창성은 검증되지 않았습니다.");
+            ui.add(egui::Slider::new(&mut self.preview_level,0..=advanced::STAGES.len()-1).text("미리보기 단계"));
+            ui.strong(advanced::STAGES[self.preview_level].name);
+            ui.horizontal_wrapped(|ui|{
+                if ui.button("이 단계에서 새 문제 조합").clicked(){self.send(Command::Preview(self.preview_level,self.quiz_count));}
+                ui.label(format!("상위 문제 영역 {}개 · 새 구조 {}회 · 반복 구조 {}회",
+                    advanced::SKILL_COUNT,fmt_num(self.snapshot.novelty_fresh),
+                    fmt_num(self.snapshot.novelty_total.saturating_sub(self.snapshot.novelty_fresh))));
+            });
         });
     }
     fn quiz_card(&mut self,ui:&mut egui::Ui) {
@@ -177,7 +203,7 @@ impl MathApp {
             egui::ScrollArea::vertical().max_height(220.0).show(ui,|ui|{
                 for (i,(question,answer)) in self.quiz.iter().enumerate() {
                     ui.horizontal_wrapped(|ui|{
-                        ui.monospace(format!("{:02}.  {} = ?",i+1,question));
+                        ui.monospace(format!("{:02}.  {}",i+1,question));
                         if self.show_answers {ui.label(format!("정답: {answer}"));}
                     });
                 }
@@ -204,11 +230,16 @@ impl eframe::App for MathApp {
                     self.quiz_card(&mut cols[1]);
                 });
                 ui.add_space(7.0);
+                self.creative_card(ui);
+                ui.add_space(7.0);
                 ui.collapsing("최근 활동 / 구조 설명",|ui|{
-                    ui.label(format!("풀이 NNUE 파라미터 {}개, 출제 NNUE 파라미터 {}개",
+                    ui.label(format!("산술 Student/Examiner {} / {} 파라미터",
                         fmt_num(self.snapshot.student_params as u64),fmt_num(self.snapshot.examiner_params as u64)));
-                    ui.label("풀이 시 정답 엔진 미사용. 학습 및 시험 채점에서만 정수 오라클 사용.");
-                    ui.label("10만 문항 중 낮은 학년은 문제 종류가 적어 중복이 불가피합니다. 고유문항 수도 기록합니다.");
+                    ui.label(format!("고급 Student/Creative Examiner {} / {} 파라미터",
+                        fmt_num(self.snapshot.advanced_params as u64),fmt_num(self.snapshot.creative_params as u64)));
+                    ui.label("산술은 신경망 숫자 예측. 고급은 신경망 정책 선택 뒤 명시적 수학 연산 실행(순수 신경망 증명기가 아님).");
+                    ui.label("시험 100,000문항의 정답률·풀이 단계율·완주율을 따로 검증. 고유 문제/구조 수 기록.");
+                    ui.label("고급 단계의 '인증'은 등록된 문제 문법 범위에 한정됩니다. 실제 IMO 대회 성적이나 새로운 정리 증명을 의미하지 않습니다.");
                     for notice in self.notices.iter().rev().take(18) {ui.label(notice);}
                 });
             });
@@ -302,6 +333,24 @@ fn run_headless(rounds:u64) {
 }
 fn main()->eframe::Result<()> {
     let args:Vec<String>=std::env::args().collect();
+    if args.iter().any(|a|a=="--smoke") {
+        use rand::{rngs::SmallRng,SeedableRng};
+        let mut rng=SmallRng::seed_from_u64(0x20261112);
+        let mut generated=0_usize;
+        for (stage,profile) in advanced::STAGES.iter().enumerate() {
+            for j in 0..100 {
+                let family=profile.skills[j%profile.skills.len()];
+                let challenge=advanced::generate(stage,family,j%6,j%4,j%8,&mut rng);
+                assert!(challenge.certified(),"{}",challenge.text());
+                for t in &challenge.tasks {
+                    assert_eq!(advanced::execute_program(t,t.kind),Some(t.expected()));
+                }
+                generated+=1;
+            }
+        }
+        println!("SMOKE OK: {} verified generated challenges / {} topic families",generated,advanced::SKILL_COUNT);
+        return Ok(());
+    }
     if args.iter().any(|a|a=="--headless") {
         let rounds=args.windows(2).find(|a|a[0]=="--rounds")
             .and_then(|a|a[1].parse::<u64>().ok()).unwrap_or(1);
