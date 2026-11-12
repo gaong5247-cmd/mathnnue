@@ -1,6 +1,6 @@
 //! Teacher/Examiner orchestration; runs on its own OS thread so egui remains responsive.
 use crate::examiner::{ExamForce, Examiner};
-use crate::math::{oracle, parse, Expr, STAGES};
+use crate::math::{oracle, parse, STAGES};
 use crate::solver::{expected_nodes, Student};
 use rand::{rngs::SmallRng, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -296,7 +296,8 @@ impl Worker {
             let width=(i / profile.ops.len()) % profile.max_digits + 1;
             let hardness=(i / (profile.ops.len()*profile.max_digits)) % 3;
             let choice=self.state.examiner.choose(stage,self.recent_accuracy(),
-                Some(ExamForce{op,digits:width,hardness}),&mut exam_rng);
+                Some(ExamForce{op,digits:width,hardness,
+                    chain:profile.chain && (i / (profile.ops.len()*profile.max_digits*3))%2==1}),&mut exam_rng);
             let expr=self.state.examiner.compose(stage,&choice,&mut exam_rng);
             let target=match oracle(&expr) {Ok(value)=>value,Err(_)=>continue};
             let prediction=self.state.student.solve(&expr,false);

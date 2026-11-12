@@ -20,6 +20,7 @@ pub struct ExamForce {
     pub op:Op,
     pub digits:usize,
     pub hardness:usize,
+    pub chain:bool,
 }
 #[derive(Clone)]
 pub struct Choice {
@@ -67,6 +68,7 @@ impl Examiner {
             allowed[0]=vec![f.op.index()];
             allowed[1]=vec![4+f.digits.clamp(1,profile.max_digits)-1];
             allowed[2]=vec![10+f.hardness.min(2)];
+            allowed[3]=vec![if f.chain && profile.chain {14} else {13}];
         }
         let mut selected=[0;4];
         for i in 0..4 {
@@ -110,10 +112,11 @@ mod tests {
         let mut rng=SmallRng::seed_from_u64(9);
         let e=Examiner::new();
         for _ in 0..200 {
-            let chosen=e.choose(8,0.7,Some(ExamForce{op:Op::Div,digits:4,hardness:2}),&mut rng);
+            let chosen=e.choose(8,0.7,Some(ExamForce{op:Op::Div,digits:4,hardness:2,chain:true}),&mut rng);
             assert_eq!(chosen.op,Op::Div);
             assert_eq!(chosen.digits,4);
             assert_eq!(chosen.hardness,2);
+            assert!(chosen.chain);
         }
     }
 }

@@ -31,7 +31,7 @@ struct MathApp {
     notices:Vec<String>,
 }
 impl MathApp {
-    fn new(context:&egui::CreationContext<'_>)->Self {
+    fn new(context:&eframe::CreationContext<'_>)->Self {
         configure_fonts(&context.egui_ctx);
         let (command, worker_commands)=mpsc::channel();
         let (worker_events, events)=mpsc::channel();
@@ -83,7 +83,7 @@ impl MathApp {
                 ui.label(format!("출제 NNUE 업데이트: {}",fmt_num(self.snapshot.generation_trials)));
             });
             let fraction=(self.snapshot.trained_this_stage as f32 / TRAIN_PER_EXAM as f32).clamp(0.0,1.0);
-            ui.add(egui::ProgressBar::new(fraction).text(format!("이번 단계 학습: {} / {}",fmt_num(self.snapshot.trained_this_stage),fmt_num(TRAIN_PER_EXAM as u64))));
+            ui.add(egui::ProgressBar::new(fraction).text(format!("이번 단계 학습: {} / {}",fmt_num(self.snapshot.trained_this_stage as u64),fmt_num(TRAIN_PER_EXAM as u64))));
             if self.snapshot.in_exam {
                 let frac=(self.snapshot.exam_progress as f32 / EXAM_SIZE as f32).clamp(0.0,1.0);
                 ui.add(egui::ProgressBar::new(frac).text(format!("시험 진행: {} / 100,000",fmt_num(self.snapshot.exam_progress as u64))));
@@ -238,7 +238,7 @@ fn score_chart(ui:&mut egui::Ui,history:&[trainer::ExamRecord]) {
     painter.rect_filled(rect,4.0,egui::Color32::from_gray(28));
     let goal_y=rect.bottom()-0.9*rect.height();
     painter.line_segment([egui::pos2(rect.left(),goal_y),egui::pos2(rect.right(),goal_y)],
-        egui::Stroke::new(1.0,egui::Color32::GRAY));
+        egui::Stroke::new(1.0_f32,egui::Color32::GRAY));
     if history.is_empty(){return;}
     let point=|i:usize,value:f32|{
         let x=if history.len()==1{0.5}else{i as f32/(history.len()-1) as f32};
@@ -246,9 +246,9 @@ fn score_chart(ui:&mut egui::Ui,history:&[trainer::ExamRecord]) {
     };
     for i in 1..history.len(){
         painter.line_segment([point(i-1,history[i-1].accuracy()),point(i,history[i].accuracy())],
-            egui::Stroke::new(2.0,egui::Color32::LIGHT_GREEN));
+            egui::Stroke::new(2.0_f32,egui::Color32::LIGHT_GREEN));
         painter.line_segment([point(i-1,history[i-1].step_rate()),point(i,history[i].step_rate())],
-            egui::Stroke::new(1.5,egui::Color32::LIGHT_BLUE));
+            egui::Stroke::new(1.5_f32,egui::Color32::LIGHT_BLUE));
     }
     for (i,entry) in history.iter().enumerate(){
         painter.circle_filled(point(i,entry.accuracy()),2.5,egui::Color32::LIGHT_GREEN);
