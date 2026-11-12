@@ -322,7 +322,7 @@ impl Worker {
         self.state.examiner.reinforce(&choice,reward);
         self.state.student.learn_problem(&expr);
         // Mixed digit drills improve transfer between unseen multi-digit problems.
-        self.state.student.drill(&mut self.rng,self.state.stage);
+        self.state.student.drill(&mut self.rng);
         self.add_recent(correct,complete);
         self.state.trained+=1;
         self.state.trained_this_stage+=1;
