@@ -2,6 +2,7 @@ mod advanced;
 mod creative;
 mod input;
 mod examiner;
+mod frontier;
 mod math;
 mod neural;
 mod solver;
@@ -64,7 +65,7 @@ impl MathApp {
             ui.heading(egui::RichText::new("MathNNUE").size(30.0).strong());
             ui.label(egui::RichText::new("STUDENT × EXAMINER").color(egui::Color32::LIGHT_BLUE));
             ui.separator();
-            ui.label(if self.snapshot.mastered {"인증형 전 과정 통과 · 지속 학습"} else if self.snapshot.in_exam {"10만 문제 시험 진행"}
+            ui.label(if self.snapshot.stage>=frontier::FRONTIER_STAGE {"30단계+ 개방형 연구 · 단계 상한 없음"} else if self.snapshot.mastered {"인증형 전 과정 통과 · 지속 학습"} else if self.snapshot.in_exam {"10만 문제 시험 진행"}
                 else if self.snapshot.running {"학습 중"} else {"일시정지"});
         });
         ui.label("초등: 순수 숫자 예측 NNUE / 고급: 신경망 풀이 전략 + 검증 가능한 수학 규칙 / 출제: 탐색·변이·신규성 보상");
@@ -86,7 +87,7 @@ impl MathApp {
                 ui.separator();
                 ui.label(format!("출제 NNUE 업데이트: {}",fmt_num(self.snapshot.generation_trials)));
                 ui.separator();
-                ui.label(format!("최종 단계 재통과: {}",self.snapshot.frontier_passes));
+                ui.label(format!("개방형 연구 주기 통과: {}",self.snapshot.frontier_passes));
             });
             let fraction=(self.snapshot.trained_this_stage as f32 / TRAIN_PER_EXAM as f32).clamp(0.0,1.0);
             ui.add(egui::ProgressBar::new(fraction).text(format!("이번 단계 학습: {} / {}",fmt_num(self.snapshot.trained_this_stage as u64),fmt_num(TRAIN_PER_EXAM as u64))));
@@ -100,7 +101,11 @@ impl MathApp {
                 ui.label(format!("최근 완주율 {:.1}%",100.0*self.snapshot.recent_completion));
             });
             ui.label(egui::RichText::new(&self.snapshot.message).weak());
-            if self.snapshot.stage>=math::STAGES.len(){
+            if self.snapshot.stage>=frontier::FRONTIER_STAGE{
+                ui.label(format!("적대적 학습: {} / 신규 AST {} / 중복 {} / 취약영역 {}",
+                    fmt_num(self.snapshot.frontier_lessons),fmt_num(self.snapshot.frontier_new),
+                    fmt_num(self.snapshot.frontier_repeat),self.snapshot.frontier_weakness));
+            } else if self.snapshot.stage>=math::STAGES.len(){
                 ui.label(format!("구조 탐색: 최근 {}개 패턴 / 누적 새 패턴 {} / 출제 {}",
                     fmt_num(self.snapshot.novelty_recent as u64),fmt_num(self.snapshot.novelty_fresh),fmt_num(self.snapshot.novelty_total)));
             }
@@ -181,11 +186,12 @@ impl MathApp {
     fn creative_card(&mut self,ui:&mut egui::Ui) {
         egui::Frame::group(ui.style()).show(ui,|ui|{
             ui.heading("창의 출제 실험실 · 대학/올림피아드/연구형");
-            ui.label("미리보기는 학습 승급을 건너뛰지 않습니다. 문제 문법은 확대되지만 실제 IMO 독창성은 검증되지 않았습니다.");
+            ui.label("30단계+부터 재귀 수식 AST 생성 · 오답률과 구조 참신성을 출제 신경망 학습에 사용 · 미리보기는 승급하지 않음");
             ui.add(egui::Slider::new(&mut self.preview_level,0..=advanced::STAGES.len()-1).text("미리보기 단계"));
             ui.strong(advanced::STAGES[self.preview_level].name);
             ui.horizontal_wrapped(|ui|{
                 if ui.button("이 단계에서 새 문제 조합").clicked(){self.send(Command::Preview(self.preview_level,self.quiz_count));}
+                if ui.button("★ 30단계+ 새 수식 생성 미리보기").clicked(){self.send(Command::PreviewFrontier(self.quiz_count));}
                 ui.label(format!("상위 문제 영역 {}개 · 새 구조 {}회 · 반복 구조 {}회",
                     advanced::SKILL_COUNT,fmt_num(self.snapshot.novelty_fresh),
                     fmt_num(self.snapshot.novelty_total.saturating_sub(self.snapshot.novelty_fresh))));
@@ -239,7 +245,8 @@ impl eframe::App for MathApp {
                         fmt_num(self.snapshot.advanced_params as u64),fmt_num(self.snapshot.creative_params as u64)));
                     ui.label("산술은 신경망 숫자 예측. 고급은 신경망 정책 선택 뒤 명시적 수학 연산 실행(순수 신경망 증명기가 아님).");
                     ui.label("시험 100,000문항의 정답률·풀이 단계율·완주율을 따로 검증. 고유 문제/구조 수 기록.");
-                    ui.label("고급 단계의 '인증'은 등록된 문제 문법 범위에 한정됩니다. 실제 IMO 대회 성적이나 새로운 정리 증명을 의미하지 않습니다.");
+                    ui.label("30단계+는 동적 다항식 AST 문법을 합성하지만 완전히 자유로운 새 수학 이론이나 IMO 정리의 증명을 뜻하지 않습니다.");
+                    ui.label("고급 수학과 개방형 풀이: NNUE가 계산 프로그램을 선택하고 제한된 기호 엔진으로 실행. 순수 신경망 증명은 아닙니다.");
                     for notice in self.notices.iter().rev().take(18) {ui.label(notice);}
                 });
             });
@@ -348,7 +355,16 @@ fn main()->eframe::Result<()> {
                 generated+=1;
             }
         }
-        println!("SMOKE OK: {} verified generated challenges / {} topic families",generated,advanced::SKILL_COUNT);
+        let frontier=frontier::Frontier::new();
+        let mut unique=std::collections::HashSet::new();
+        for i in 0..280 {
+            let (_,q)=frontier.propose(Some(i%frontier::GOAL_COUNT),&mut rng).expect("valid frontier");
+            assert!(q.verified());
+            unique.insert(q.pattern);
+        }
+        assert!(unique.len()>100);
+        println!("SMOKE OK: {} advanced + 280 frontier generated, {} new AST structures",
+            generated,unique.len());
         return Ok(());
     }
     if args.iter().any(|a|a=="--headless") {

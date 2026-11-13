@@ -1,4 +1,4 @@
-# MathNNUE 2.0 — Self-Evolving Mathematical Problem Lab
+# MathNNUE 3.0 — Adversarial Open Frontier
 
 A native **Rust + egui** experimental laboratory with two independently trained neural problem-generators/solver policies. Starts from elementary arithmetic and progressively unlocks equations, calculus, combinatorics, algebra, university material and **IMO-themed certified templates**. The long-range ambition is to discover difficult, original problems; this version **does not** claim general mathematical creativity, IMO performance, mathematical research breakthroughs, or the ability to prove arbitrary conjectures.
 
@@ -48,3 +48,28 @@ A generated question must pass structural restrictions. Examinations use indepen
 ## Security
 
 No network service, no auto-updates, and no external API key. Everything runs locally; GitHub Actions downloads are build artifacts, not signatures. For reproducibility build from source yourself.
+
+
+## Stage 30+ — adaptive adversarial expression synthesis
+
+Passing stage 29 unlocks a **permanent stage 30+ frontier**, not another fixed
+worksheet. A separate examiner NNUE samples a *recursive symbolic AST* grammar
+(constants, variables, addition, subtraction, multiplication, powers), controls
+expression depth and type, learns from actual student failures and avoids recent
+structural duplicates. A separate frontier student NNUE learns to select among
+seven solution programs. The polynomial interpreter performs the exact arithmetic
+and an independent tree evaluator checks normal forms; the NNUE does **not**
+prove arbitrary symbolic identities end-to-end.
+
+The training phase retains earlier advanced topics (1 in 7 questions) and
+uses novel compositional expressions for the rest. Every 20,000 lessons an
+independently seeded 100,000 question exam checks 90% accuracy, step rate and
+completion, plus uniqueness of expressions and AST signatures. Passing raises
+the generator's exploration epoch, not a finite stage counter. Earlier
+checkpoints are migrated without deleting existing NNUE weights.
+
+The "★ 30단계+" preview button tests the new generator without advancing stages.
+
+**Limitations:** bounded degree and operators, no automatic discovery or proof
+of previously unknown mathematical theorems, no established IMO-level creativity.
+Structure novelty is an internal heuristic, not mathematical originality.

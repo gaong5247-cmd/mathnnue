@@ -48,6 +48,7 @@ pub struct Frontier {
     pub student: SparseNet,
     pub composer_updates: u64,
     pub student_lessons: u64,
+    #[serde(default)] pub epoch:u64,
     pub archive: NoveltyArchive,
     pub weaknesses: [Weakness; GOAL_COUNT],
 }
@@ -57,7 +58,7 @@ impl Frontier {
         Self {
             composer: SparseNet::new(96, 72, COMPOSER_OUTPUTS, 0xF0120_2026),
             student: SparseNet::new(SOLVER_FEATURES, 72, GOAL_COUNT, 0x5A1A_2026),
-            composer_updates: 0, student_lessons: 0,
+            composer_updates: 0, student_lessons: 0, epoch:0,
             archive: NoveltyArchive::default(),
             weaknesses: [Weakness::default(); GOAL_COUNT],
         }
@@ -113,8 +114,9 @@ impl Frontier {
     pub fn propose<R:Rng>(&self,forced_goal:Option<usize>,rng:&mut R)->Option<(Choice,Question)>{
         // Candidate search is structurally open: no list of fixed polynomial templates.
         let mut best:Option<(f32,Choice,Question)>=None;
-        for _ in 0..28 {
-            let choice=self.choose(forced_goal,rng);
+        for _ in 0..if forced_goal.is_some(){8}else{16} {
+            let mut choice=self.choose(forced_goal,rng);
+            choice.depth=(choice.depth+(self.epoch as usize/2).min(2)).min(8);
             let Some(question)=Question::generate(&choice,rng) else {continue;};
             let novelty=self.archive.novelty(question.pattern);
             let vulnerability=self.weaknesses[choice.goal].score();
