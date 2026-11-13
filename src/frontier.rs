@@ -254,7 +254,7 @@ fn combine(a:&[i128],b:&[i128],sign:i128)->Option<Vec<i128>>{
 }
 fn multiply(a:&[i128],b:&[i128])->Option<Vec<i128>>{
     if a.len()+b.len()>MAX_DEGREE+2 {return None;}
-    let mut c=vec![0;a.len()+b.len()-1];
+    let mut c=vec![0_i128;a.len()+b.len()-1];
     for (i,&x) in a.iter().enumerate(){
         for (j,&y) in b.iter().enumerate(){
             c[i+j]=c[i+j].checked_add(x.checked_mul(y)?)?;
@@ -415,7 +415,7 @@ fn prompt_features(text:&str)->Vec<usize>{
         }
     }
     set.insert((chars.len()/24).min(15));
-    set.insert(16+(chars.iter().filter(|c|*c=='x').count()/5).min(15));
+    set.insert(16+(chars.iter().filter(|c|**c=='x').count()/5).min(15));
     let mut active:Vec<usize>=set.into_iter().collect();
     active.sort_unstable();active
 }
